@@ -529,15 +529,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["tournament", "metaculus_cup", "test_questions"],
+        choices=["tournament", "minibench", "test_questions"],
         default="tournament",
         help="Specify the run mode (default: tournament)",
     )
     args = parser.parse_args()
-    run_mode: Literal["tournament", "metaculus_cup", "test_questions"] = args.mode
+    run_mode: Literal["tournament", "minibench", "test_questions"] = args.mode
     assert run_mode in [
         "tournament",
-        "metaculus_cup",
+        "minibench",
         "test_questions",
     ], "Invalid run mode"
 
@@ -570,13 +570,13 @@ if __name__ == "__main__":
             )
         )
         forecast_reports = seasonal_tournament_reports + minibench_reports
-    elif run_mode == "metaculus_cup":
+    elif run_mode == "minibench":
         # The Metaculus cup is a good way to test the bot's performance on regularly open questions. You can also use AXC_2025_TOURNAMENT_ID = 32564 or AI_2027_TOURNAMENT_ID = "ai-2027"
         # The Metaculus cup may not be initialized near the beginning of a season (i.e. January, May, September)
         template_bot.skip_previously_forecasted_questions = False
         forecast_reports = asyncio.run(
             template_bot.forecast_on_tournament(
-                MetaculusApi.CURRENT_METACULUS_CUP_ID, return_exceptions=True
+                "minibench", return_exceptions=True
             )
         )
     elif run_mode == "test_questions":
