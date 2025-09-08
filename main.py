@@ -316,49 +316,39 @@ class FallTemplateBot2025(ForecastBot):
     )
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
 
-    async def run_research(self, question: MetaculusQuestion) -> str:
+async def run_research(self, question: MetaculusQuestion) -> str:
+        """
+        Runs research on a question using AskNews, respecting the new free tier
+        rate limits (1 request per 10 seconds, sequential execution).
+        """
         async with self._concurrency_limiter:
             searcher = AskNewsSearcher()
             
-            # --- Attempt 1: Targeted, high-signal queries ---
-            logger.info(f"Running targeted searches for {question.page_url}...")
+            # New, more efficient strategy: Start with one high-quality broad query.
+            # This reduces API calls from 2-3 per question down to just 1.
+            logger.info(f"Running efficient search for {question.page_url} respecting AskNews rate limits...")
             
-            # Simplified queries for better reliability
-            expert_query = f"expert forecast {question.question_text}"
-            community_query = f"metaculus forecast {question.question_text}"
+            try:
+                # Perform a single, comprehensive search.
+                # Parameters are simplified to comply with the free tier.
+                research_text = await searcher.get_formatted_deep_research(
+                    question.question_text,
+                    sources=["asknews"],
+                    model="deepseek-basic", # This is a compliant basic model
+                )
+                
+                # If the first search succeeds, we are done.
+                if research_text:
+                    logger.info(f"Found Research for URL {question.page_url}:\n{research_text}")
+                    return research_text
 
-            tasks = [
-                searcher.get_formatted_deep_research(
-                    query, sources=["asknews"], model="deepseek-basic", search_depth=2, max_depth=2
-                ) for query in [expert_query, community_query]
-            ]
-            search_results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            research_sections = []
-            if not isinstance(search_results[0], Exception) and search_results[0]:
-                research_sections.append(f"--- Expert Forecasts ---\n{search_results[0]}")
-            if not isinstance(search_results[1], Exception) and search_results[1]:
-                research_sections.append(f"--- Community Forecasts ---\n{search_results[1]}")
+            except Exception as e:
+                logger.error(f"Initial search failed for {question.page_url}: {e}")
+                # Fall through to the final "no research" message.
 
-            combined_research = "\n\n".join(research_sections)
-
-            # --- Attempt 2: Fallback to a broad query if targeted searches fail ---
-            if not combined_research:
-                logger.warning(f"Targeted searches failed. Falling back to broad search for {question.page_url}...")
-                try:
-                    combined_research = await searcher.get_formatted_deep_research(
-                        question.question_text,
-                        sources=["asknews"],
-                        model="deepseek-basic",
-                        search_depth=2,
-                        max_depth=2,
-                    )
-                except Exception as e:
-                    logger.error(f"Broad search also failed for {question.page_url}: {e}")
-                    combined_research = "No research could be found."
-            
-            logger.info(f"Found Research for URL {question.page_url}:\n{combined_research}")
-            return combined_research
+            # If the search returns nothing or fails, return a default message.
+            logger.warning(f"Could not find any research for {question.page_url}.")
+            return "No research could be found."
 
     async def _run_forecast_on_binary(
         self, question: BinaryQuestion, research: str
