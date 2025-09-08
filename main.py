@@ -3,6 +3,7 @@ load_dotenv()
 import argparse
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -278,37 +279,39 @@ class FallTemplateBot2025(ForecastBot):
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         """
-        Runs research on a question using AskNews, respecting the new free tier
-        rate limits (1 request per 10 seconds, sequential execution).
+        Runs research using Anthropic API for analysis
         """
-        async with self._concurrency_limiter:
-            searcher = AskNewsSearcher()
+        logger.info(f"Running research for '{question.question_text}' using Anthropic...")
+    
+        try:
+            research_model = GeneralLlm(
+                model="anthropic/claude-sonnet-4-20250514",
+                api_key=os.getenv("ANTHROPIC_API_KEY"),
+                temperature=0.3
+            )
             
-            # New, more efficient strategy: Start with one high-quality broad query.
-            # This reduces API calls from 2-3 per question down to just 1.
-            logger.info(f"Running efficient search for {question.page_url} respecting AskNews rate limits...")
+            research_prompt = f"""
+            Analyse this forecasting question: {question.question_text}
             
-            try:
-                # Perform a single, comprehensive search.
-                # Parameters are simplified to comply with the free tier.
-                research_text = await searcher.get_formatted_deep_research(
-                    question.question_text,
-                    sources=["asknews"],
-                    model="deepseek-basic", # This is a compliant basic model
-                )
-                
-                # If the first search succeeds, we are done.
-                if research_text:
-                    logger.info(f"Found Research for URL {question.page_url}:\n{research_text}")
-                    return research_text
-
-            except Exception as e:
-                logger.error(f"Initial search failed for {question.page_url}: {e}")
-                # Fall through to the final "no research" message.
-
-            # If the search returns nothing or fails, return a default message.
-            logger.warning(f"Could not find any research for {question.page_url}.")
-            return "No research could be found."
+            Provide comprehensive analysis covering:
+            - Historical context and relevant precedents
+            - Key factors that influence such outcomes
+            - Base rates for similar events
+            - Current trends and patterns (within your knowledge)
+            - Important considerations for forecasting
+            - Potential scenarios and their likelihood drivers
+            
+            Focus on factual analysis that would inform an accurate probability estimate.
+            Be explicit about knowledge limitations and uncertainty.
+            """
+            
+            research_text = await research_model.invoke(research_prompt)
+            logger.info("Successfully completed research analysis")
+            return research_text
+        
+        except Exception as e:
+            logger.error(f"Anthropic research failed: {e}")
+            return f"Research analysis failed: {e}"
 
     async def _run_forecast_on_binary(
         self, question: BinaryQuestion, research: str
@@ -334,7 +337,7 @@ class FallTemplateBot2025(ForecastBot):
             logger.error(f"High-Impact Analyst failed: {e}")
             counter_argument = "The High-Impact Analyst failed to produce a counter-argument."
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         total_duration = (question.close_time - question.published_time).total_seconds()
         time_remaining = (question.close_time - now).total_seconds()
         
@@ -395,7 +398,7 @@ class FallTemplateBot2025(ForecastBot):
             logger.error(f"High-Impact Analyst failed: {e}")
             counter_argument = "The High-Impact Analyst failed to produce a counter-argument."
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         total_duration = (question.close_time - question.published_time).total_seconds()
         time_remaining = (question.close_time - now).total_seconds()
         time_decay_info = "Not a time-sensitive question."
@@ -574,9 +577,9 @@ if __name__ == "__main__":
     elif run_mode == "test_questions":
         # Example questions are a good way to test the bot's performance on a single question
         EXAMPLE_QUESTIONS = [
-            "https://www.metaculus.com/questions/578/human-extinction-by-2100/",  # Human Extinction - Binary
-            "https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",  # Age of Oldest Human - Numeric
-           "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",  # Number of New Leading AI Labs - Multiple Choice
+           ## "https://www.metaculus.com/questions/578/human-extinction-by-2100/",  # Human Extinction - Binary
+           ##  "https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",  # Age of Oldest Human - Numeric
+           ## "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",  # Number of New Leading AI Labs - Multiple Choice
             "https://www.metaculus.com/c/diffusion-community/38880/how-many-us-labor-strikes-due-to-ai-in-2029/",  # Number of US Labor Strikes Due to AI in 2029 - Discrete
         ]
         template_bot.skip_previously_forecasted_questions = False
