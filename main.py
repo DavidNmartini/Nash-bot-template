@@ -193,7 +193,7 @@ MODEL_CROWD = [
     },
     {
         "persona": "High-Impact", 
-        "model": "openrouter/google/gemini-pro-1.5", 
+        "model": "openrouter/anthropic/claude-4-sonnet", 
         "prompts": {
             "binary": HIGH_IMPACT_PROMPT_BINARY,
             "numeric": HIGH_IMPACT_PROMPT_NUMERIC,
