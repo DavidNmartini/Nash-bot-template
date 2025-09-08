@@ -202,46 +202,6 @@ MODEL_CROWD = [
     },
 ]
 
-# 1b. Add the new systematic reasoning prompt
-
-SYSTEMATIC_REASONING_PROMPT_BINARY = clean_indents(
-    f"""
-    {GENERAL_INSTRUCTIONS}
-
-    --- Systematic Forecaster's Task ---
-    Question to Forecast: {{question_text}}
-    Background Information: {{background_info}}
-    Resolution Criteria: {{resolution_criteria}}
-    Fine Print: {{fine_print}}
-    Today's Date: {{today}}
-    Available Research: {{research}}
-    
-    Forecasting Process: Weighted Critique & Sensitivity-Driven Revision
-    You will engage in a three-phase forecasting process to determine the probability of the question stated above resolving as "Yes". Your goal is to produce a well-reasoned forecast incorporating rigorous critique and revision.
-
-    Phase 1: Initial Scenario Development & Probability Assessment (Blue Team Perspective)
-    Based on the provided information and research, perform the following:
-    1. Develop Three Scenarios: Optimistic (resolves "Yes"), Pessimistic (resolves "No"), and Most Likely Scenario. Describe the plausible sequence of events and key drivers for each
-    2. Initial Probability Assessment: Provide an initial probability estimate (e.g., 0.65) that the question will resolve as "Yes", with a brief rationale
-
-    Phase 2: Red Team Critique with Impact Assessment
-    Adopt the role of a Red Team to critically evaluate the Phase 1 output.
-    1. Critique Each Scenario: For each of the three scenarios, assess plausibility, identify flawed assumptions, and note overlooked factors
-    2. Assign Impact Scores: For each critique point, assign a Vulnerability Score (1-5) for the original assumption and a Plausibility of Alternative Score (1-5) for your counter-argument
-    3. Critique the Method: Evaluate the reasoning for the initial probability and identify potential cognitive biases (e.g., anchoring, confirmation bias)
-    4. Identify Most Critical Assumptions: List the 2-3 assumptions whose failure would most drastically alter the forecast
-
-    Phase 3: Synthesis, Sensitivity-Driven Revision, and Final Forecast
-    Revert to the role of the Synthesizer.
-    1. Review Red Team Critique: Analyze the critiques, focusing on those with high impact scores
-    2. Revise Scenarios: Briefly explain how the Red Team's feedback led to changes in your scenarios
-    3. Qualitative Sensitivity Analysis: For each "Most Critical Assumption," briefly discuss how your forecast would change if that assumption were invalid
-    4. Final Rationale and Forecast: Provide a comprehensive final rationale that explains how the critiques and sensitivity analysis influenced your final probability
-    
-    The last thing you write must be your final answer as: "Probability: ZZ%"
-    """
-)
-
 class FallTemplateBot2025(ForecastBot):
     """
     This is a copy of the template bot for Fall 2025 Metaculus AI Tournament.
@@ -567,7 +527,7 @@ if __name__ == "__main__":
         
         # Configure the llms dictionary to use the best tools
         llms={
-            "researcher": "asknews/deep-research/medium-depth",
+             "default": "openrouter/openai/gpt-4o",
             "parser": "openrouter/openai/gpt-4o-mini",
         },
     )
