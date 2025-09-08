@@ -276,7 +276,7 @@ class FallTemplateBot2025(ForecastBot):
     )
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
 
-async def run_research(self, question: MetaculusQuestion) -> str:
+    async def run_research(self, question: MetaculusQuestion) -> str:
         """
         Runs research on a question using AskNews, respecting the new free tier
         rate limits (1 request per 10 seconds, sequential execution).
