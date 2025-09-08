@@ -26,6 +26,10 @@ from forecasting_tools import (
     structure_output,
 )
 
+# Disable OpenAI tracing warnings
+os.environ["OPENAI_API_KEY"] = "dummy"
+logging.getLogger("openai.agents").setLevel(logging.ERROR)
+
 logger = logging.getLogger(__name__)
 
 
@@ -293,16 +297,17 @@ class FallTemplateBot2025(ForecastBot):
             research_prompt = f"""
             Analyse this forecasting question: {question.question_text}
             
-            Provide comprehensive analysis covering:
-            - Historical context and relevant precedents
+            Provide succinct analysis covering:
             - Key factors that influence such outcomes
             - Base rates for similar events
             - Current trends and patterns (within your knowledge)
             - Important considerations for forecasting
             - Potential scenarios and their likelihood drivers
+
+            If you need to use the web search tool, please do so but only a maximum of 3 times.
             
             Focus on factual analysis that would inform an accurate probability estimate.
-            Be explicit about knowledge limitations and uncertainty.
+            Aim to maximise the amount of information you can provide in a concise manner. (Max 500 words)
             """
             
             research_text = await research_model.invoke(research_prompt)
