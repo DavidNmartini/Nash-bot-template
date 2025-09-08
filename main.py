@@ -1,7 +1,9 @@
+from dotenv import load_dotenv
+load_dotenv()
 import argparse
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 from forecasting_tools import (
@@ -26,27 +28,235 @@ from forecasting_tools import (
 logger = logging.getLogger(__name__)
 
 
+# New block of general instructions to be prepended to all prompts
+GENERAL_INSTRUCTIONS = clean_indents(
+    """
+    **General Operating Principles:**
+    Your response must adhere to the following rules.
+
+    **Style and Tone:**
+    - Use British English and grammar
+    - Be as terse as possible
+    - No em dashes, Oxford commas, or full stops at the end of list items
+    - No extra bolding or italicising
+    - No formalities, praise, exclamation marks, or emojis
+    - Write naturally, not like a report. Avoid repetition and disclaimers (e.g., "I am an AI", "I am not an expert")
+
+    **Reasoning and Analysis:**
+    - Quantify statements and use explicit probabilities whenever possible
+    - Your analysis should be robust enough to withstand critique from economists and superforecasters
+    - Consider counterfactuals and acknowledge trade-offs
+    - Explicitly notice and explain your uncertainties and confidence levels
+    - Be sceptical of all information, including your own. Flag unverified claims with [may need verification]
+    - When presented with statistics, polls, or research, first critique the methodology, sampling, and potential for bias before accepting the premise
+    - Flag any assumptions you make to fill in gaps not explicitly stated in the question
+    - Provide context (e.g., geography, timeframe) for all quantitative or trend-based statements
+    - Do not state obvious facts; assume a strong user knowledge base in economics and analytics
+    - Prioritise the most important hypotheses; do not give equal weight to all ideas
+
+    **Language Constraints:**
+    - Taboo words (and their variants): "fundamental", "engaging", "deep", "captivating", "dance", "crucial"
+    - Avoid formulaic sentences like "isn't just x, but also y" or platitudes
+    - Preferred terminology for countries: LMICs, HICs, richer/poorer countries
+
+    **Interaction Protocol:**
+    - Do not provide sycophantic flattery or hollow validation
+    - Probe assumptions, surface bias, present counter-evidence, challenge emotional framing, and disagree openly when warranted
+    """
+)
+
+SCEPTIC_PROMPT_BINARY = clean_indents(
+    f"""
+    {GENERAL_INSTRUCTIONS}
+
+    --- Sceptic's Task ---
+    You are a 'Base Rate Absolutist', a forecaster whose predictions are rigorously anchored to historical precedent.
+
+    Your Task: A High-Impact analyst has presented a case for a particular outcome. Your job is to first establish the historical base rate and then critically evaluate if the analyst's argument is strong enough to justify deviating from it.
+
+    Your Process:
+    1.  **Determine the Base Rate:** From the provided research on "{{question_text}}", what is the historical base rate for events of this type? State this clearly
+    2.  **Anchor on the Base Rate:** This number is your anchor. Your default forecast must be very close to it
+    3.  **Evaluate the Counter-Argument:** The High-Impact Analyst has made this case: "{{counter_argument}}". Does this argument provide *extraordinary, quantifiable evidence* of a shift that makes the historical base rate irrelevant? Mere narrative or speculation is insufficient
+    4.  **Produce Final Forecast:** Based on your analysis, write a single, dense paragraph. It must begin by stating the base rate, then explain why you are either sticking to it or deviating slightly based on the strength (or weakness) of the counter-argument
+
+    **Time Decay Analysis:** {{time_decay_info}}
+    **Full Research Text:**
+    {{research}}
+
+    The last thing you write must be your final answer as: "Probability: ZZ%"
+    """
+)
+
+HIGH_IMPACT_PROMPT_BINARY = clean_indents(
+    f"""
+    {GENERAL_INSTRUCTIONS}
+
+    --- High-Impact Analyst's Task ---
+    You are a High-Impact Analyst, skilled at identifying unlikely but plausible "black swan" events.
+    Your task is to find the single most compelling chain of events from the provided research that would cause this event **to happen**.
+    Acknowledge that this path is unlikely, but argue for its plausibility.
+    Your entire rationale must be a single, dense paragraph.
+
+    Research on "{{question_text}}":
+    {{research}}
+
+    The last thing you write must be your final answer as: "Probability: ZZ%"
+    """
+)
+
+SCEPTIC_PROMPT_NUMERIC = clean_indents(
+    f"""
+    {GENERAL_INSTRUCTIONS}
+
+    --- Sceptic's Task ---
+    You are a 'Base Rate Absolutist', a forecaster who anchors on historical trends for numeric questions.
+    A High-Impact analyst has provided a wide, volatile distribution. Your task is to rebut it with a more conservative forecast anchored in the data.
+
+    Your Process:
+    1.  **Determine the Base Rate / Trend:** From the research on "{{question_text}}", what is the historical trend, average, or status quo value? This is your central anchor (50th percentile)
+    2.  **Evaluate the Counter-Argument:** The High-Impact Analyst's reasoning is: "{{counter_argument}}". Does this justify their extreme distribution, or is it speculative?
+    3.  **Produce Final Forecast:** Provide a tight, conservative distribution of percentiles anchored around the base rate. Your rationale should be a single, dense paragraph explaining why a deviation from the historical trend is unlikely
+
+    **Time Decay Analysis:** {{time_decay_info}}
+    **Full Research Text:**
+    {{research}}
+
+    The last thing you write is your final answer with percentile estimates from 10 to 90.
+    """
+)
+
+HIGH_IMPACT_PROMPT_NUMERIC = clean_indents(
+    f"""
+    {GENERAL_INSTRUCTIONS}
+
+    --- High-Impact Analyst's Task ---
+    You are a High-Impact Analyst, skilled at identifying "fat tail" risks for numeric questions.
+    Your task is to produce a wide distribution that accounts for plausible black swan events, based on the research for "{{question_text}}".
+    Your rationale should be a single, dense paragraph arguing why a volatile or unexpected outcome is more likely than the boring trendline.
+    
+    Full Research Text:
+    {{research}}
+    
+    The last thing you write is your final answer with percentile estimates from 10 to 90.
+    """
+)
+
+SCEPTIC_PROMPT_MC = clean_indents(
+    f"""
+    {GENERAL_INSTRUCTIONS}
+
+    --- Sceptic's Task ---
+    You are a 'Base Rate Absolutist', a forecaster who anchors on the most likely or status quo option in a multiple-choice question.
+    A High-Impact analyst has argued for an unlikely option. Your task is to rebut their case and provide a conservative forecast anchored on the most probable outcome.
+
+    Your Process:
+    1.  **Determine the Base Rate / Favourite:** From the research on "{{question_text}}", which of the options {{options}} is the clear favourite or status quo?
+    2.  **Evaluate the Counter-Argument:** The High-Impact Analyst's reasoning is: "{{counter_argument}}". Does this justify assigning high probability to a long-shot option?
+    3.  **Produce Final Forecast:** Provide probabilities for all options that heavily favour the most likely outcome. Your rationale should be a single, dense paragraph explaining why the status quo is likely to hold
+
+    **Full Research Text:**
+    {{research}}
+    
+    The last thing you write is your final probabilities for all options.
+    """
+)
+
+HIGH_IMPACT_PROMPT_MC = clean_indents(
+    f"""
+    {GENERAL_INSTRUCTIONS}
+
+    --- High-Impact Analyst's Task ---
+    You are a High-Impact Analyst, skilled at identifying plausible "dark horse" candidates in multiple-choice questions.
+    Your task is to make the strongest case for an unlikely option being more probable than commonly thought, based on the research for "{{question_text}}".
+    The options are: {{options}}.
+    Your rationale should be a single, dense paragraph. Your probability distribution should reflect this contrarian view by assigning a surprisingly high probability to one of the non-favourite options.
+    
+    Full Research Text:
+    {{research}}
+
+    The last thing you write is your final probabilities for all options.
+    """
+)
+
+
+# We now define our "Team of Rivals" with all the prompts
+MODEL_CROWD = [
+    {
+        "persona": "Sceptic", 
+        "model": "openrouter/openai/gpt-4o", 
+        "prompts": {
+            "binary": SCEPTIC_PROMPT_BINARY, 
+            "numeric": SCEPTIC_PROMPT_NUMERIC, 
+            "multiple_choice": SCEPTIC_PROMPT_MC
+        }
+    },
+    {
+        "persona": "High-Impact", 
+        "model": "openrouter/google/gemini-pro-1.5", 
+        "prompts": {
+            "binary": HIGH_IMPACT_PROMPT_BINARY,
+            "numeric": HIGH_IMPACT_PROMPT_NUMERIC,
+            "multiple_choice": HIGH_IMPACT_PROMPT_MC
+        }
+    },
+]
+
+# 1b. Add the new systematic reasoning prompt
+
+SYSTEMATIC_REASONING_PROMPT_BINARY = clean_indents(
+    f"""
+    {GENERAL_INSTRUCTIONS}
+
+    --- Systematic Forecaster's Task ---
+    Question to Forecast: {{question_text}}
+    Background Information: {{background_info}}
+    Resolution Criteria: {{resolution_criteria}}
+    Fine Print: {{fine_print}}
+    Today's Date: {{today}}
+    Available Research: {{research}}
+    
+    Forecasting Process: Weighted Critique & Sensitivity-Driven Revision
+    You will engage in a three-phase forecasting process to determine the probability of the question stated above resolving as "Yes". Your goal is to produce a well-reasoned forecast incorporating rigorous critique and revision.
+
+    Phase 1: Initial Scenario Development & Probability Assessment (Blue Team Perspective)
+    Based on the provided information and research, perform the following:
+    1. Develop Three Scenarios: Optimistic (resolves "Yes"), Pessimistic (resolves "No"), and Most Likely Scenario. Describe the plausible sequence of events and key drivers for each
+    2. Initial Probability Assessment: Provide an initial probability estimate (e.g., 0.65) that the question will resolve as "Yes", with a brief rationale
+
+    Phase 2: Red Team Critique with Impact Assessment
+    Adopt the role of a Red Team to critically evaluate the Phase 1 output.
+    1. Critique Each Scenario: For each of the three scenarios, assess plausibility, identify flawed assumptions, and note overlooked factors
+    2. Assign Impact Scores: For each critique point, assign a Vulnerability Score (1-5) for the original assumption and a Plausibility of Alternative Score (1-5) for your counter-argument
+    3. Critique the Method: Evaluate the reasoning for the initial probability and identify potential cognitive biases (e.g., anchoring, confirmation bias)
+    4. Identify Most Critical Assumptions: List the 2-3 assumptions whose failure would most drastically alter the forecast
+
+    Phase 3: Synthesis, Sensitivity-Driven Revision, and Final Forecast
+    Revert to the role of the Synthesizer.
+    1. Review Red Team Critique: Analyze the critiques, focusing on those with high impact scores
+    2. Revise Scenarios: Briefly explain how the Red Team's feedback led to changes in your scenarios
+    3. Qualitative Sensitivity Analysis: For each "Most Critical Assumption," briefly discuss how your forecast would change if that assumption were invalid
+    4. Final Rationale and Forecast: Provide a comprehensive final rationale that explains how the critiques and sensitivity analysis influenced your final probability
+    
+    The last thing you write must be your final answer as: "Probability: ZZ%"
+    """
+)
+
 class FallTemplateBot2025(ForecastBot):
     """
     This is a copy of the template bot for Fall 2025 Metaculus AI Tournament.
-    This bot is what is used by Metaculus in our benchmark, but is also provided as a template for new bot makers.
-    This template is given as-is, and though we have covered most test cases
-    in forecasting-tools it may be worth double checking key components locally.
+    
 
     Main changes since Q2:
-    - An LLM now parses the final forecast output (rather than programmatic parsing)
-    - Added resolution criteria and fine print explicitly to the research prompt
-    - Previously in the prompt, nothing about upper/lower bound was shown when the bounds were open. Now a suggestion is made when this is the case.
-    - Support for nominal bounds was added (i.e. when there are discrete questions and normal upper/lower bounds are not as intuitive)
 
     The main entry point of this bot is `forecast_on_tournament` in the parent class.
     See the script at the bottom of the file for more details on how to run the bot.
+
     Ignoring the finer details, the general flow is:
     - Load questions from Metaculus
     - For each question
         - Execute run_research a number of times equal to research_reports_per_question
         - Execute respective run_forecast function `predictions_per_research_report * research_reports_per_question` times
-        - Aggregate the predictions
         - Submit prediction (if publish_reports_to_metaculus is True)
     - Return a list of ForecastReport objects
 
@@ -108,239 +318,195 @@ class FallTemplateBot2025(ForecastBot):
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
-            research = ""
-            researcher = self.get_llm("researcher")
+            searcher = AskNewsSearcher()
+            
+            # --- Attempt 1: Targeted, high-signal queries ---
+            logger.info(f"Running targeted searches for {question.page_url}...")
+            
+            # Simplified queries for better reliability
+            expert_query = f"expert forecast {question.question_text}"
+            community_query = f"metaculus forecast {question.question_text}"
 
-            prompt = clean_indents(
-                f"""
-                You are an assistant to a superforecaster.
-                The superforecaster will give you a question they intend to forecast on.
-                To be a great assistant, you generate a concise but detailed rundown of the most relevant news, including if the question would resolve Yes or No based on current information.
-                You do not produce forecasts yourself.
+            tasks = [
+                searcher.get_formatted_deep_research(
+                    query, sources=["asknews"], model="deepseek-basic", search_depth=2, max_depth=2
+                ) for query in [expert_query, community_query]
+            ]
+            search_results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            research_sections = []
+            if not isinstance(search_results[0], Exception) and search_results[0]:
+                research_sections.append(f"--- Expert Forecasts ---\n{search_results[0]}")
+            if not isinstance(search_results[1], Exception) and search_results[1]:
+                research_sections.append(f"--- Community Forecasts ---\n{search_results[1]}")
 
-                Question:
-                {question.question_text}
+            combined_research = "\n\n".join(research_sections)
 
-                This question's outcome will be determined by the specific criteria below:
-                {question.resolution_criteria}
-
-                {question.fine_print}
-                """
-            )
-
-            if isinstance(researcher, GeneralLlm):
-                research = await researcher.invoke(prompt)
-            elif researcher == "asknews/news-summaries":
-                research = await AskNewsSearcher().get_formatted_news_async(
-                    question.question_text
-                )
-            elif researcher == "asknews/deep-research/medium-depth":
-                research = await AskNewsSearcher().get_formatted_deep_research(
-                    question.question_text,
-                    sources=["asknews", "google"],
-                    search_depth=2,
-                    max_depth=4,
-                )
-            elif researcher == "asknews/deep-research/high-depth":
-                research = await AskNewsSearcher().get_formatted_deep_research(
-                    question.question_text,
-                    sources=["asknews", "google"],
-                    search_depth=4,
-                    max_depth=6,
-                )
-            elif researcher.startswith("smart-searcher"):
-                model_name = researcher.removeprefix("smart-searcher/")
-                searcher = SmartSearcher(
-                    model=model_name,
-                    temperature=0,
-                    num_searches_to_run=2,
-                    num_sites_per_search=10,
-                    use_advanced_filters=False,
-                )
-                research = await searcher.invoke(prompt)
-            elif not researcher or researcher == "None":
-                research = ""
-            else:
-                research = await self.get_llm("researcher", "llm").invoke(prompt)
-            logger.info(f"Found Research for URL {question.page_url}:\n{research}")
-            return research
+            # --- Attempt 2: Fallback to a broad query if targeted searches fail ---
+            if not combined_research:
+                logger.warning(f"Targeted searches failed. Falling back to broad search for {question.page_url}...")
+                try:
+                    combined_research = await searcher.get_formatted_deep_research(
+                        question.question_text,
+                        sources=["asknews"],
+                        model="deepseek-basic",
+                        search_depth=2,
+                        max_depth=2,
+                    )
+                except Exception as e:
+                    logger.error(f"Broad search also failed for {question.page_url}: {e}")
+                    combined_research = "No research could be found."
+            
+            logger.info(f"Found Research for URL {question.page_url}:\n{combined_research}")
+            return combined_research
 
     async def _run_forecast_on_binary(
         self, question: BinaryQuestion, research: str
     ) -> ReasonedPrediction[float]:
-        prompt = clean_indents(
-            f"""
-            You are a professional forecaster interviewing for a job.
+        
+        high_impact_analyst = next((analyst for analyst in MODEL_CROWD if analyst["persona"] == "High-Impact"), None)
+        sceptic_analyst = next((analyst for analyst in MODEL_CROWD if analyst["persona"] == "Sceptic"), None)
 
-            Your interview question is:
-            {question.question_text}
+        if not high_impact_analyst or not sceptic_analyst:
+            raise ValueError("Both Sceptic and High-Impact personas must be in MODEL_CROWD")
 
-            Question background:
-            {question.background_info}
+        try:
+            logger.info("Running High-Impact Analyst for binary question...")
+            high_impact_prompt = high_impact_analyst["prompts"]["binary"].format(
+                question_text=question.question_text, research=research
+            )
+            high_impact_llm = GeneralLlm(model=high_impact_analyst["model"])
+            counter_argument = await high_impact_llm.invoke(high_impact_prompt)
+        except Exception as e:
+            logger.error(f"High-Impact Analyst failed: {e}")
+            counter_argument = "The High-Impact Analyst failed to produce a counter-argument."
 
-
-            This question's outcome will be determined by the specific criteria below. These criteria have not yet been satisfied:
-            {question.resolution_criteria}
-
-            {question.fine_print}
-
-
-            Your research assistant says:
-            {research}
-
-            Today is {datetime.now().strftime("%Y-%m-%d")}.
-
-            Before answering you write:
-            (a) The time left until the outcome to the question is known.
-            (b) The status quo outcome if nothing changed.
-            (c) A brief description of a scenario that results in a No outcome.
-            (d) A brief description of a scenario that results in a Yes outcome.
-
-            You write your rationale remembering that good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time.
-
-            The last thing you write is your final answer as: "Probability: ZZ%", 0-100
-            """
+        now = datetime.now(timezone.utc)
+        total_duration = (question.close_time - question.published_time).total_seconds()
+        time_remaining = (question.close_time - now).total_seconds()
+        
+        time_decay_info = "Not a time-sensitive question."
+        if total_duration > 3600 and time_remaining > 0:
+            time_elapsed_percent = (1 - (time_remaining / total_duration)) * 100
+            days_remaining = time_remaining / (24 * 3600)
+            time_decay_info = (
+                f"The forecasting period is {time_elapsed_percent:.0f}% complete with {days_remaining:.1f} days remaining. "
+                "The event has not yet occurred. The probability should be decayed accordingly."
+            )
+        
+        logger.info("Running Sceptic Analyst to rebut and provide final forecast...")
+        sceptic_prompt_text = sceptic_analyst["prompts"]["binary"].format(
+            question_text=question.question_text,
+            research=research,
+            time_decay_info=time_decay_info,
+            counter_argument=counter_argument
         )
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
-        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
+        
+        sceptic_llm = GeneralLlm(model=sceptic_analyst["model"])
+        final_reasoning = await sceptic_llm.invoke(sceptic_prompt_text)
+
         binary_prediction: BinaryPrediction = await structure_output(
-            reasoning, BinaryPrediction, model=self.get_llm("parser", "llm")
+            final_reasoning, BinaryPrediction, model=self.get_llm("parser", "llm")
         )
-        decimal_pred = max(0.01, min(0.99, binary_prediction.prediction_in_decimal))
+        final_prediction = max(0.005, min(0.995, binary_prediction.prediction_in_decimal))
 
         logger.info(
-            f"Forecasted URL {question.page_url} with prediction: {decimal_pred}"
+            f"Final Answer taken from Sceptic persona after rebuttal: {final_prediction*100:.1f}%"
         )
-        return ReasonedPrediction(prediction_value=decimal_pred, reasoning=reasoning)
-
-    async def _run_forecast_on_multiple_choice(
-        self, question: MultipleChoiceQuestion, research: str
-    ) -> ReasonedPrediction[PredictedOptionList]:
-        prompt = clean_indents(
-            f"""
-            You are a professional forecaster interviewing for a job.
-
-            Your interview question is:
-            {question.question_text}
-
-            The options are: {question.options}
-
-
-            Background:
-            {question.background_info}
-
-            {question.resolution_criteria}
-
-            {question.fine_print}
-
-
-            Your research assistant says:
-            {research}
-
-            Today is {datetime.now().strftime("%Y-%m-%d")}.
-
-            Before answering you write:
-            (a) The time left until the outcome to the question is known.
-            (b) The status quo outcome if nothing changed.
-            (c) A description of an scenario that results in an unexpected outcome.
-
-            You write your rationale remembering that (1) good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time, and (2) good forecasters leave some moderate probability on most options to account for unexpected outcomes.
-
-            The last thing you write is your final probabilities for the N options in this order {question.options} as:
-            Option_A: Probability_A
-            Option_B: Probability_B
-            ...
-            Option_N: Probability_N
-            """
-        )
-        parsing_instructions = clean_indents(
-            f"""
-            Make sure that all option names are one of the following:
-            {question.options}
-            The text you are parsing may prepend these options with some variation of "Option" which you should remove if not part of the option names I just gave you.
-            """
-        )
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
-        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
-        predicted_option_list: PredictedOptionList = await structure_output(
-            text_to_structure=reasoning,
-            output_type=PredictedOptionList,
-            model=self.get_llm("parser", "llm"),
-            additional_instructions=parsing_instructions,
-        )
-        logger.info(
-            f"Forecasted URL {question.page_url} with prediction: {predicted_option_list}"
-        )
-        return ReasonedPrediction(
-            prediction_value=predicted_option_list, reasoning=reasoning
-        )
+        return ReasonedPrediction(prediction_value=final_prediction, reasoning=final_reasoning)
 
     async def _run_forecast_on_numeric(
         self, question: NumericQuestion, research: str
     ) -> ReasonedPrediction[NumericDistribution]:
-        upper_bound_message, lower_bound_message = (
-            self._create_upper_and_lower_bound_messages(question)
+        
+        high_impact_analyst = next((analyst for analyst in MODEL_CROWD if analyst["persona"] == "High-Impact"), None)
+        sceptic_analyst = next((analyst for analyst in MODEL_CROWD if analyst["persona"] == "Sceptic"), None)
+
+        if not high_impact_analyst or not sceptic_analyst:
+            raise ValueError("Both Sceptic and High-Impact personas must be in MODEL_CROWD")
+
+        try:
+            logger.info("Running High-Impact Analyst for numeric question...")
+            high_impact_prompt = high_impact_analyst["prompts"]["numeric"].format(
+                question_text=question.question_text, research=research
+            )
+            high_impact_llm = GeneralLlm(model=high_impact_analyst["model"])
+            counter_argument = await high_impact_llm.invoke(high_impact_prompt)
+        except Exception as e:
+            logger.error(f"High-Impact Analyst failed: {e}")
+            counter_argument = "The High-Impact Analyst failed to produce a counter-argument."
+
+        now = datetime.now(timezone.utc)
+        total_duration = (question.close_time - question.published_time).total_seconds()
+        time_remaining = (question.close_time - now).total_seconds()
+        time_decay_info = "Not a time-sensitive question."
+        if total_duration > 3600 and time_remaining > 0:
+            time_elapsed_percent = (1 - (time_remaining / total_duration)) * 100
+            days_remaining = time_remaining / (24 * 3600)
+            time_decay_info = f"The forecasting period is {time_elapsed_percent:.0f}% complete."
+
+        logger.info("Running Sceptic Analyst to rebut and provide final forecast...")
+        sceptic_prompt_text = sceptic_analyst["prompts"]["numeric"].format(
+            question_text=question.question_text,
+            research=research,
+            time_decay_info=time_decay_info,
+            counter_argument=counter_argument
         )
-        prompt = clean_indents(
-            f"""
-            You are a professional forecaster interviewing for a job.
+        
+        sceptic_llm = GeneralLlm(model=sceptic_analyst["model"])
+        final_reasoning = await sceptic_llm.invoke(sceptic_prompt_text)
 
-            Your interview question is:
-            {question.question_text}
-
-            Background:
-            {question.background_info}
-
-            {question.resolution_criteria}
-
-            {question.fine_print}
-
-            Units for answer: {question.unit_of_measure if question.unit_of_measure else "Not stated (please infer this)"}
-
-            Your research assistant says:
-            {research}
-
-            Today is {datetime.now().strftime("%Y-%m-%d")}.
-
-            {lower_bound_message}
-            {upper_bound_message}
-
-            Formatting Instructions:
-            - Please notice the units requested (e.g. whether you represent a number as 1,000,000 or 1 million).
-            - Never use scientific notation.
-            - Always start with a smaller number (more negative if negative) and then increase from there
-
-            Before answering you write:
-            (a) The time left until the outcome to the question is known.
-            (b) The outcome if nothing changed.
-            (c) The outcome if the current trend continued.
-            (d) The expectations of experts and markets.
-            (e) A brief description of an unexpected scenario that results in a low outcome.
-            (f) A brief description of an unexpected scenario that results in a high outcome.
-
-            You remind yourself that good forecasters are humble and set wide 90/10 confidence intervals to account for unknown unknowns.
-
-            The last thing you write is your final answer as:
-            "
-            Percentile 10: XX
-            Percentile 20: XX
-            Percentile 40: XX
-            Percentile 60: XX
-            Percentile 80: XX
-            Percentile 90: XX
-            "
-            """
-        )
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
-        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         percentile_list: list[Percentile] = await structure_output(
-            reasoning, list[Percentile], model=self.get_llm("parser", "llm")
+            final_reasoning, list[Percentile], model=self.get_llm("parser", "llm")
         )
-        prediction = NumericDistribution.from_question(percentile_list, question)
+        final_prediction = NumericDistribution.from_question(percentile_list, question)
+        
         logger.info(
-            f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}"
+            f"Final Answer taken from Sceptic persona after rebuttal: {final_prediction.declared_percentiles}"
         )
-        return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)
+        return ReasonedPrediction(prediction_value=final_prediction, reasoning=final_reasoning)
+
+    async def _run_forecast_on_multiple_choice(
+        self, question: MultipleChoiceQuestion, research: str
+    ) -> ReasonedPrediction[PredictedOptionList]:
+        
+        high_impact_analyst = next((analyst for analyst in MODEL_CROWD if analyst["persona"] == "High-Impact"), None)
+        sceptic_analyst = next((analyst for analyst in MODEL_CROWD if analyst["persona"] == "Sceptic"), None)
+
+        if not high_impact_analyst or not sceptic_analyst:
+            raise ValueError("Both Sceptic and High-Impact personas must be in MODEL_CROWD")
+
+        try:
+            logger.info("Running High-Impact Analyst for multiple choice question...")
+            high_impact_prompt = high_impact_analyst["prompts"]["multiple_choice"].format(
+                question_text=question.question_text, research=research, options=question.options
+            )
+            high_impact_llm = GeneralLlm(model=high_impact_analyst["model"])
+            counter_argument = await high_impact_llm.invoke(high_impact_prompt)
+        except Exception as e:
+            logger.error(f"High-Impact Analyst failed: {e}")
+            counter_argument = "The High-Impact Analyst failed to produce a counter-argument."
+        
+        logger.info("Running Sceptic Analyst to rebut and provide final forecast...")
+        sceptic_prompt_text = sceptic_analyst["prompts"]["multiple_choice"].format(
+            question_text=question.question_text,
+            research=research,
+            options=question.options,
+            counter_argument=counter_argument
+        )
+        
+        sceptic_llm = GeneralLlm(model=sceptic_analyst["model"])
+        final_reasoning = await sceptic_llm.invoke(sceptic_prompt_text)
+
+        predicted_option_list: PredictedOptionList = await structure_output(
+            text_to_structure=final_reasoning,
+            output_type=PredictedOptionList,
+            model=self.get_llm("parser", "llm"),
+        )
+        logger.info(
+            f"Final Answer taken from Sceptic persona after rebuttal: {predicted_option_list}"
+        )
+        return ReasonedPrediction(prediction_value=predicted_option_list, reasoning=final_reasoning)
 
     def _create_upper_and_lower_bound_messages(
         self, question: NumericQuestion
@@ -401,22 +567,19 @@ if __name__ == "__main__":
 
     template_bot = FallTemplateBot2025(
         research_reports_per_question=1,
-        predictions_per_research_report=5,
+        # The loop is now handled inside the bot, so this should be 1
+        predictions_per_research_report=1,
+        
         use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=True,
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
-        # llms={  # choose your model names or GeneralLlm llms here, otherwise defaults will be chosen for you
-        #     "default": GeneralLlm(
-        #         model="openrouter/openai/gpt-4o", # "anthropic/claude-3-5-sonnet-20241022", etc (see docs for litellm)
-        #         temperature=0.3,
-        #         timeout=40,
-        #         allowed_tries=2,
-        #     ),
-        #     "summarizer": "openai/gpt-4o-mini",
-        #     "researcher": "asknews/deep-research/low",
-        #     "parser": "openai/gpt-4o-mini",
-        # },
+        
+        # Configure the llms dictionary to use the best tools
+        llms={
+            "researcher": "asknews/deep-research/medium-depth",
+            "parser": "openrouter/openai/gpt-4o-mini",
+        },
     )
 
     if run_mode == "tournament":
@@ -445,7 +608,7 @@ if __name__ == "__main__":
         EXAMPLE_QUESTIONS = [
             "https://www.metaculus.com/questions/578/human-extinction-by-2100/",  # Human Extinction - Binary
             "https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",  # Age of Oldest Human - Numeric
-            "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",  # Number of New Leading AI Labs - Multiple Choice
+           "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",  # Number of New Leading AI Labs - Multiple Choice
             "https://www.metaculus.com/c/diffusion-community/38880/how-many-us-labor-strikes-due-to-ai-in-2029/",  # Number of US Labor Strikes Due to AI in 2029 - Discrete
         ]
         template_bot.skip_previously_forecasted_questions = False
