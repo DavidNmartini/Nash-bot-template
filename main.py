@@ -193,7 +193,7 @@ MODEL_CROWD = [
     },
     {
         "persona": "High-Impact", 
-        "model": "openrouter/google/gemini-pro-1.5", 
+        "model": "openrouter/anthropic/claude-3-5-sonnet", 
         "prompts": {
             "binary": HIGH_IMPACT_PROMPT_BINARY,
             "numeric": HIGH_IMPACT_PROMPT_NUMERIC,
@@ -201,46 +201,6 @@ MODEL_CROWD = [
         }
     },
 ]
-
-# 1b. Add the new systematic reasoning prompt
-
-SYSTEMATIC_REASONING_PROMPT_BINARY = clean_indents(
-    f"""
-    {GENERAL_INSTRUCTIONS}
-
-    --- Systematic Forecaster's Task ---
-    Question to Forecast: {{question_text}}
-    Background Information: {{background_info}}
-    Resolution Criteria: {{resolution_criteria}}
-    Fine Print: {{fine_print}}
-    Today's Date: {{today}}
-    Available Research: {{research}}
-    
-    Forecasting Process: Weighted Critique & Sensitivity-Driven Revision
-    You will engage in a three-phase forecasting process to determine the probability of the question stated above resolving as "Yes". Your goal is to produce a well-reasoned forecast incorporating rigorous critique and revision.
-
-    Phase 1: Initial Scenario Development & Probability Assessment (Blue Team Perspective)
-    Based on the provided information and research, perform the following:
-    1. Develop Three Scenarios: Optimistic (resolves "Yes"), Pessimistic (resolves "No"), and Most Likely Scenario. Describe the plausible sequence of events and key drivers for each
-    2. Initial Probability Assessment: Provide an initial probability estimate (e.g., 0.65) that the question will resolve as "Yes", with a brief rationale
-
-    Phase 2: Red Team Critique with Impact Assessment
-    Adopt the role of a Red Team to critically evaluate the Phase 1 output.
-    1. Critique Each Scenario: For each of the three scenarios, assess plausibility, identify flawed assumptions, and note overlooked factors
-    2. Assign Impact Scores: For each critique point, assign a Vulnerability Score (1-5) for the original assumption and a Plausibility of Alternative Score (1-5) for your counter-argument
-    3. Critique the Method: Evaluate the reasoning for the initial probability and identify potential cognitive biases (e.g., anchoring, confirmation bias)
-    4. Identify Most Critical Assumptions: List the 2-3 assumptions whose failure would most drastically alter the forecast
-
-    Phase 3: Synthesis, Sensitivity-Driven Revision, and Final Forecast
-    Revert to the role of the Synthesizer.
-    1. Review Red Team Critique: Analyze the critiques, focusing on those with high impact scores
-    2. Revise Scenarios: Briefly explain how the Red Team's feedback led to changes in your scenarios
-    3. Qualitative Sensitivity Analysis: For each "Most Critical Assumption," briefly discuss how your forecast would change if that assumption were invalid
-    4. Final Rationale and Forecast: Provide a comprehensive final rationale that explains how the critiques and sensitivity analysis influenced your final probability
-    
-    The last thing you write must be your final answer as: "Probability: ZZ%"
-    """
-)
 
 class FallTemplateBot2025(ForecastBot):
     """
@@ -317,48 +277,38 @@ class FallTemplateBot2025(ForecastBot):
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
 
     async def run_research(self, question: MetaculusQuestion) -> str:
+        """
+        Runs research on a question using AskNews, respecting the new free tier
+        rate limits (1 request per 10 seconds, sequential execution).
+        """
         async with self._concurrency_limiter:
             searcher = AskNewsSearcher()
             
-            # --- Attempt 1: Targeted, high-signal queries ---
-            logger.info(f"Running targeted searches for {question.page_url}...")
+            # New, more efficient strategy: Start with one high-quality broad query.
+            # This reduces API calls from 2-3 per question down to just 1.
+            logger.info(f"Running efficient search for {question.page_url} respecting AskNews rate limits...")
             
-            # Simplified queries for better reliability
-            expert_query = f"expert forecast {question.question_text}"
-            community_query = f"metaculus forecast {question.question_text}"
+            try:
+                # Perform a single, comprehensive search.
+                # Parameters are simplified to comply with the free tier.
+                research_text = await searcher.get_formatted_deep_research(
+                    question.question_text,
+                    sources=["asknews"],
+                    model="deepseek-basic", # This is a compliant basic model
+                )
+                
+                # If the first search succeeds, we are done.
+                if research_text:
+                    logger.info(f"Found Research for URL {question.page_url}:\n{research_text}")
+                    return research_text
 
-            tasks = [
-                searcher.get_formatted_deep_research(
-                    query, sources=["asknews"], model="deepseek-basic", search_depth=2, max_depth=2
-                ) for query in [expert_query, community_query]
-            ]
-            search_results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            research_sections = []
-            if not isinstance(search_results[0], Exception) and search_results[0]:
-                research_sections.append(f"--- Expert Forecasts ---\n{search_results[0]}")
-            if not isinstance(search_results[1], Exception) and search_results[1]:
-                research_sections.append(f"--- Community Forecasts ---\n{search_results[1]}")
+            except Exception as e:
+                logger.error(f"Initial search failed for {question.page_url}: {e}")
+                # Fall through to the final "no research" message.
 
-            combined_research = "\n\n".join(research_sections)
-
-            # --- Attempt 2: Fallback to a broad query if targeted searches fail ---
-            if not combined_research:
-                logger.warning(f"Targeted searches failed. Falling back to broad search for {question.page_url}...")
-                try:
-                    combined_research = await searcher.get_formatted_deep_research(
-                        question.question_text,
-                        sources=["asknews"],
-                        model="deepseek-basic",
-                        search_depth=2,
-                        max_depth=2,
-                    )
-                except Exception as e:
-                    logger.error(f"Broad search also failed for {question.page_url}: {e}")
-                    combined_research = "No research could be found."
-            
-            logger.info(f"Found Research for URL {question.page_url}:\n{combined_research}")
-            return combined_research
+            # If the search returns nothing or fails, return a default message.
+            logger.warning(f"Could not find any research for {question.page_url}.")
+            return "No research could be found."
 
     async def _run_forecast_on_binary(
         self, question: BinaryQuestion, research: str
@@ -375,13 +325,16 @@ class FallTemplateBot2025(ForecastBot):
             high_impact_prompt = high_impact_analyst["prompts"]["binary"].format(
                 question_text=question.question_text, research=research
             )
-            high_impact_llm = GeneralLlm(model=high_impact_analyst["model"])
+            litellm_params = {}
+            if "openai" in high_impact_analyst["model"]:
+                litellm_params = {"service_tier": "flex"}
+            high_impact_llm = GeneralLlm(model=high_impact_analyst["model"], litellm_params=litellm_params)
             counter_argument = await high_impact_llm.invoke(high_impact_prompt)
         except Exception as e:
             logger.error(f"High-Impact Analyst failed: {e}")
             counter_argument = "The High-Impact Analyst failed to produce a counter-argument."
 
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
         total_duration = (question.close_time - question.published_time).total_seconds()
         time_remaining = (question.close_time - now).total_seconds()
         
@@ -402,7 +355,10 @@ class FallTemplateBot2025(ForecastBot):
             counter_argument=counter_argument
         )
         
-        sceptic_llm = GeneralLlm(model=sceptic_analyst["model"])
+        litellm_params = {}
+        if "openai" in sceptic_analyst["model"]:
+            litellm_params = {"service_tier": "flex"}
+        sceptic_llm = GeneralLlm(model=sceptic_analyst["model"], litellm_params=litellm_params)
         final_reasoning = await sceptic_llm.invoke(sceptic_prompt_text)
 
         binary_prediction: BinaryPrediction = await structure_output(
@@ -430,13 +386,16 @@ class FallTemplateBot2025(ForecastBot):
             high_impact_prompt = high_impact_analyst["prompts"]["numeric"].format(
                 question_text=question.question_text, research=research
             )
-            high_impact_llm = GeneralLlm(model=high_impact_analyst["model"])
+            litellm_params = {}
+            if "openai" in high_impact_analyst["model"]:
+                litellm_params = {"service_tier": "flex"}
+            high_impact_llm = GeneralLlm(model=high_impact_analyst["model"], litellm_params=litellm_params)
             counter_argument = await high_impact_llm.invoke(high_impact_prompt)
         except Exception as e:
             logger.error(f"High-Impact Analyst failed: {e}")
             counter_argument = "The High-Impact Analyst failed to produce a counter-argument."
 
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
         total_duration = (question.close_time - question.published_time).total_seconds()
         time_remaining = (question.close_time - now).total_seconds()
         time_decay_info = "Not a time-sensitive question."
@@ -453,7 +412,10 @@ class FallTemplateBot2025(ForecastBot):
             counter_argument=counter_argument
         )
         
-        sceptic_llm = GeneralLlm(model=sceptic_analyst["model"])
+        litellm_params = {}
+        if "openai" in sceptic_analyst["model"]:
+            litellm_params = {"service_tier": "flex"}
+        sceptic_llm = GeneralLlm(model=sceptic_analyst["model"], litellm_params=litellm_params)
         final_reasoning = await sceptic_llm.invoke(sceptic_prompt_text)
 
         percentile_list: list[Percentile] = await structure_output(
@@ -481,7 +443,10 @@ class FallTemplateBot2025(ForecastBot):
             high_impact_prompt = high_impact_analyst["prompts"]["multiple_choice"].format(
                 question_text=question.question_text, research=research, options=question.options
             )
-            high_impact_llm = GeneralLlm(model=high_impact_analyst["model"])
+            litellm_params = {}
+            if "openai" in high_impact_analyst["model"]:
+                litellm_params = {"service_tier": "flex"}
+            high_impact_llm = GeneralLlm(model=high_impact_analyst["model"], litellm_params=litellm_params)
             counter_argument = await high_impact_llm.invoke(high_impact_prompt)
         except Exception as e:
             logger.error(f"High-Impact Analyst failed: {e}")
@@ -495,7 +460,10 @@ class FallTemplateBot2025(ForecastBot):
             counter_argument=counter_argument
         )
         
-        sceptic_llm = GeneralLlm(model=sceptic_analyst["model"])
+        litellm_params = {}
+        if "openai" in sceptic_analyst["model"]:
+            litellm_params = {"service_tier": "flex"}
+        sceptic_llm = GeneralLlm(model=sceptic_analyst["model"], litellm_params=litellm_params)
         final_reasoning = await sceptic_llm.invoke(sceptic_prompt_text)
 
         predicted_option_list: PredictedOptionList = await structure_output(
@@ -577,7 +545,7 @@ if __name__ == "__main__":
         
         # Configure the llms dictionary to use the best tools
         llms={
-            "researcher": "asknews/deep-research/medium-depth",
+             "default": "openrouter/openai/gpt-4o",
             "parser": "openrouter/openai/gpt-4o-mini",
         },
     )
