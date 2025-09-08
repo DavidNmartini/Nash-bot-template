@@ -381,7 +381,7 @@ class FallTemplateBot2025(ForecastBot):
             logger.error(f"High-Impact Analyst failed: {e}")
             counter_argument = "The High-Impact Analyst failed to produce a counter-argument."
 
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
         total_duration = (question.close_time - question.published_time).total_seconds()
         time_remaining = (question.close_time - now).total_seconds()
         
@@ -436,7 +436,7 @@ class FallTemplateBot2025(ForecastBot):
             logger.error(f"High-Impact Analyst failed: {e}")
             counter_argument = "The High-Impact Analyst failed to produce a counter-argument."
 
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
         total_duration = (question.close_time - question.published_time).total_seconds()
         time_remaining = (question.close_time - now).total_seconds()
         time_decay_info = "Not a time-sensitive question."
