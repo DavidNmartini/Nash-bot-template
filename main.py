@@ -127,6 +127,13 @@ SCEPTIC_PROMPT_NUMERIC = clean_indents(
     **Full Research Text:**
     {{research}}
 
+    CRITICAL: Your percentile values must be meaningfully different from each other. Ensure there are substantial gaps between:
+    - 10th percentile (much lower than median)
+    - 25th percentile (somewhat lower than median) 
+    - 50th percentile (your central estimate)
+    - 75th percentile (somewhat higher than median)
+    - 90th percentile (much higher than median)
+
     The last thing you write is your final answer with percentile estimates from 10 to 90.
     """
 )
@@ -142,6 +149,13 @@ HIGH_IMPACT_PROMPT_NUMERIC = clean_indents(
     
     Full Research Text:
     {{research}}
+    
+    CRITICAL: Your percentile values must be meaningfully different from each other. Create a wide distribution with substantial gaps between:
+    - 10th percentile (very low possibility)
+    - 25th percentile (low possibility)
+    - 50th percentile (median estimate)
+    - 75th percentile (high possibility)  
+    - 90th percentile (very high possibility)
     
     The last thing you write is your final answer with percentile estimates from 10 to 90.
     """
