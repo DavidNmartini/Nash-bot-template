@@ -3,7 +3,7 @@ name: Forecast on Minibench
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 0 */2 * *" # runs at midnight every 2 days
+  - cron: "*/20 * * * *"  # Every 20 minutes, all days
 
 # Add concurrency group to prevent parallel runs
 concurrency:
